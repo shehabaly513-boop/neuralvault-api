@@ -1,9 +1,14 @@
-import {Module,Controller,Post,Body,Injectable,UnauthorizedException,ConflictException} from '@nestjs/common';
-import {JwtModule,JwtService} from '@nestjs/jwt'; import * as bcrypt from 'bcrypt'; import {PrismaService} from './prisma.service';
-@Injectable() export class AuthService { constructor(private db:PrismaService,private jwt:JwtService){}
- async register(email:string,password:string){ email=email?.trim().toLowerCase(); if(!email||!password||password.length<8) throw new ConflictException('Valid email and password of at least 8 characters are required'); const exists=await this.db.user.findUnique({where:{email}}); if(exists)throw new ConflictException('Email already exists'); const u=await this.db.user.create({data:{email,passwordHash:await bcrypt.hash(password,12)}}); for(const type of ['AVAILABLE','LOCKED','ACCRUED_RETURN','AFFILIATE','PENDING']) await this.db.account.create({data:{userId:u.id,type:type as any}}); return this.token(u.id,u.email,u.role); }
- async login(email:string,password:string){const u=await this.db.user.findUnique({where:{email:email?.trim().toLowerCase()}});if(!u||!(await bcrypt.compare(password||'',u.passwordHash)))throw new UnauthorizedException('Invalid credentials');return this.token(u.id,u.email,u.role)}
- private token(id:string,email:string,role:string){return {accessToken:this.jwt.sign({sub:id,email,role}),user:{id,email,role}}}
-}
-@Controller('auth') export class AuthController{constructor(private a:AuthService){} @Post('register') register(@Body()b:any){return this.a.register(b.email,b.password)} @Post('login') login(@Body()b:any){return this.a.login(b.email,b.password)}}
-@Module({imports:[JwtModule.register({secret:process.env.JWT_SECRET||'dev-secret',signOptions:{expiresIn:'24h'}})],controllers:[AuthController],providers:[PrismaService,AuthService],exports:[PrismaService,AuthService,JwtModule]}) export class AuthModule{}
+import { Module } from '@nestjs/common';
+import { JwtModule } from '@nestjs/jwt';
+
+@Module({
+  imports: [
+    JwtModule.register({
+      secret: process.env.JWT_SECRET || 'neuralvault-dev-secret',
+      signOptions: { expiresIn: '7d' },
+    }),
+  ],
+  providers: [],
+  exports: [JwtModule],
+})
+export class AuthModule {}
