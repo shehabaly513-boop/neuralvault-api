@@ -1,35 +1,254 @@
-import {Module,Controller,Get,Post,Body,Param,Req,UseGuards,Headers,BadRequestException,ForbiddenException} from '@nestjs/common';
-import {PrismaService} from './prisma.service'; import {AuthGuard} from './auth.guard'; import {randomUUID,createHmac} from 'crypto';
-const PLANS:any={
- 'AI Spark':{principal:10,days:7,fee:.02},'Neural Rise':{principal:25,days:10,fee:.02},'Quantum AI':{principal:50,days:14,fee:.025},'AI Pro Max':{principal:75,days:21,fee:.03},'Neural Elite':{principal:100,days:30,fee:.03}
+import {
+  Module,
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Req,
+  UseGuards,
+  Headers,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
+
+import { PrismaService } from './prisma.service';
+import { AuthGuard } from './auth.guard';
+import { AuthModule } from './auth.module';
+import { randomUUID } from 'crypto';
+
+const PLANS: any = {
+  'AI Spark': {
+    principal: 10,
+    days: 7,
+    fee: 0.02,
+  },
+  'Neural Rise': {
+    principal: 25,
+    days: 10,
+    fee: 0.02,
+  },
+  'Quantum AI': {
+    principal: 50,
+    days: 14,
+    fee: 0.025,
+  },
+  'AI Pro Max': {
+    principal: 75,
+    days: 21,
+    fee: 0.03,
+  },
+  'Neural Elite': {
+    principal: 100,
+    days: 30,
+    fee: 0.03,
+  },
 };
-const D=(x:any)=>Number(x); const dec=(x:number)=>x.toFixed(8);
-@Controller('finance') @UseGuards(AuthGuard)
-export class FinanceController{constructor(private db:PrismaService){}
- private async accounts(tx:any,userId:string){const a=await tx.account.findMany({where:{userId}});return Object.fromEntries(a.map((x:any)=>[x.type,x]));}
- private async ensureSystem(tx:any){let u=await tx.user.findUnique({where:{email:'system@neuralvault.local'}});if(!u){u=await tx.user.create({data:{email:'system@neuralvault.local',passwordHash:'SYSTEM',role:'ADMIN',accounts:{create:{type:'SYSTEM',currency:'USD'}}}})} return u;}
- private async move(tx:any,userId:string,from:any,to:any,amount:number,type:any,referenceId?:string,description?:string){if(amount<=0)throw new BadRequestException('Amount must be positive');const acc=await this.accounts(tx,userId);if(D(acc[from].balance)<amount)throw new BadRequestException('Insufficient available balance');await tx.account.update({where:{id:acc[from].id},data:{balance:{decrement:dec(amount)},version:{increment:1}}});await tx.account.update({where:{id:acc[to].id},data:{balance:{increment:dec(amount)},version:{increment:1}}});const tid=randomUUID();for(const [accountId,direction] of [[acc[from].id,'DEBIT'],[acc[to].id,'CREDIT']])await tx.ledgerEntry.create({data:{transactionId:tid,userId,accountId,type,amount:dec(amount),direction,referenceId,description}});return tid;}
- @Get('me') async me(@Req()r:any){const userId=r.user.sub;const [u,accounts,investments,withdrawals,deposits,tickets,ledger]=await Promise.all([this.db.user.findUnique({where:{id:userId},select:{id:true,email:true,role:true}}),this.db.account.findMany({where:{userId}}),this.db.investment.findMany({where:{userId},orderBy:{createdAt:'desc'}}),this.db.withdrawal.findMany({where:{userId},orderBy:{createdAt:'desc'},take:20}),this.db.deposit.findMany({where:{userId},orderBy:{createdAt:'desc'},take:20}),this.db.supportTicket.findMany({where:{userId},orderBy:{createdAt:'desc'}}),this.db.ledgerEntry.findMany({where:{userId},orderBy:{createdAt:'desc'},take:50})]);return {user:u,accounts,investments,withdrawals,deposits,tickets,ledger};}
- @Get('plans') plans(){return Object.entries(PLANS).map(([name,v]:any)=>({name,...v}));}
- @Get('affiliate') async affiliate(@Req()r:any){let a=await this.db.affiliateProfile.findUnique({where:{userId:r.user.sub}});if(!a)a=await this.db.affiliateProfile.create({data:{userId:r.user.sub,referralCode:'NV-'+r.user.sub.slice(-8).toUpperCase()}});return a;}
- @Post('affiliate/commission') async commission(@Req()r:any,@Body()b:any){const fee=D(b.platformFee);if(fee<=0)throw new BadRequestException('Invalid fee');const a=await this.db.affiliateProfile.findUnique({where:{userId:r.user.sub}});if(!a)throw new BadRequestException('Affiliate profile not found');const c=fee*D(a.commissionRate);const acc=await this.db.account.findUnique({where:{userId_type_currency:{userId:r.user.sub,type:'AFFILIATE',currency:'USD'}}});if(!acc)throw new BadRequestException('Affiliate account missing');return this.db.$transaction(async tx=>{await tx.account.update({where:{id:acc.id},data:{balance:{increment:dec(c)},version:{increment:1}}});await tx.affiliateProfile.update({where:{id:a.id},data:{totalCommission:{increment:dec(c)}}});await tx.ledgerEntry.create({data:{transactionId:randomUUID(),userId:r.user.sub,accountId:acc.id,type:'AFFILIATE_COMMISSION',amount:dec(c),direction:'CREDIT',description:'Commission from actual platform fee'}});return {commission:c,rate:D(a.commissionRate),platformFee:fee};});}
- @Post('deposits') async deposit(@Req()r:any,@Body()b:any){const amount=D(b.amount);if(amount<=0)throw new BadRequestException('Invalid amount');const idempotency=b.idempotencyKey||randomUUID();const existing=await this.db.deposit.findUnique({where:{idempotencyKey:idempotency}});if(existing)return existing;return this.db.deposit.create({data:{userId:r.user.sub,amount:dec(amount),currency:b.currency||'USD',provider:b.provider||'demo',idempotencyKey:idempotency,status:'PENDING'}});}
- @Post('deposits/:id/confirm') async confirm(@Req()r:any,@Param('id')id:string){const dep=await this.db.deposit.findUnique({where:{id}});if(!dep||dep.userId!==r.user.sub)throw new BadRequestException('Deposit not found');if(dep.status==='CONFIRMED')return dep;return this.db.$transaction(async tx=>{const sys=await this.ensureSystem(tx);const accounts=await this.accounts(tx,r.user.sub);const amount=D(dep.amount);await tx.account.update({where:{id:accounts.AVAILABLE.id},data:{balance:{increment:dec(amount)},version:{increment:1}}});const sa=await tx.account.findUnique({where:{userId_type_currency:{userId:sys.id,type:'SYSTEM',currency:'USD'}}});await tx.account.update({where:{id:sa!.id},data:{balance:{decrement:dec(amount)},version:{increment:1}}});const tid=randomUUID();await tx.ledgerEntry.createMany({data:[{transactionId:tid,userId:r.user.sub,accountId:accounts.AVAILABLE.id,type:'DEPOSIT',amount:dec(amount),currency:'USD',direction:'CREDIT',referenceId:id,description:'Verified deposit'},{transactionId:tid,userId:sys.id,accountId:sa!.id,type:'DEPOSIT',amount:dec(amount),currency:'USD',direction:'DEBIT',referenceId:id,description:'Clearing counter-entry'}]});await tx.auditLog.create({data:{userId:r.user.sub,actorId:r.user.sub,action:'DEPOSIT_CONFIRMED',entityType:'Deposit',entityId:id}});return tx.deposit.update({where:{id},data:{status:'CONFIRMED',confirmedAt:new Date()}});});}
- @Post('investments') async invest(@Req()r:any,@Body()b:any){const p=PLANS[b.name];if(!p)throw new BadRequestException('Unknown plan');return this.db.$transaction(async tx=>{const acc=await this.accounts(tx,r.user.sub);if(D(acc.AVAILABLE.balance)<p.principal)throw new BadRequestException('Insufficient available balance');const inv=await tx.investment.create({data:{userId:r.user.sub,name:b.name,principal:dec(p.principal),feeRate:dec(p.fee),status:'LOCKED',startAt:new Date(),unlockAt:new Date(Date.now()+p.days*86400000)}});await this.move(tx,r.user.sub,'AVAILABLE','LOCKED',p.principal,'INVESTMENT_CREATED',inv.id,`Locked ${b.name}`);await tx.auditLog.create({data:{userId:r.user.sub,actorId:r.user.sub,action:'INVESTMENT_CREATED',entityType:'Investment',entityId:inv.id}});return inv;});}
- @Post('investments/:id/settle') async settle(@Req()r:any,@Param('id')id:string,@Body()b:any){return this.db.$transaction(async tx=>{const inv=await tx.investment.findUnique({where:{id}});if(!inv||inv.userId!==r.user.sub)throw new BadRequestException('Investment not found');if(inv.status==='COMPLETED')return inv;if(inv.unlockAt && inv.unlockAt>new Date())throw new BadRequestException('Investment is still locked');const performance=D(b.performance||0);const gross=D(inv.principal)+performance;const fee=gross*D(inv.feeRate);const net=Math.max(0,gross-fee);const acc=await this.accounts(tx,r.user.sub);await tx.account.update({where:{id:acc.LOCKED.id},data:{balance:{decrement:dec(D(inv.principal))},version:{increment:1}}});await tx.account.update({where:{id:acc.AVAILABLE.id},data:{balance:{increment:dec(net)},version:{increment:1}}});if(performance!==0)await tx.account.update({where:{id:acc.ACCRUED_RETURN.id},data:{balance:{increment:dec(performance)},version:{increment:1}}});const tid=randomUUID();await tx.ledgerEntry.createMany({data:[{transactionId:tid,userId:r.user.sub,accountId:acc.LOCKED.id,type:'INVESTMENT_UNLOCKED',amount:dec(D(inv.principal)),direction:'DEBIT',referenceId:id,description:'Principal unlocked'},{transactionId:tid,userId:r.user.sub,accountId:acc.AVAILABLE.id,type:'INVESTMENT_SETTLED',amount:dec(net),direction:'CREDIT',referenceId:id,description:'Settlement net of fee'}]});return tx.investment.update({where:{id},data:{realizedPerformance:dec(performance),status:'COMPLETED',settledAt:new Date()}});});}
- @Post('withdrawals') async withdraw(@Req()r:any,@Body()b:any){const amount=D(b.amount);if(amount<=0||!b.address||!b.network)throw new BadRequestException('Amount, address and network required');const key=b.idempotencyKey||randomUUID();const ex=await this.db.withdrawal.findUnique({where:{idempotencyKey:key}});if(ex)return ex;return this.db.$transaction(async tx=>{const acc=await this.accounts(tx,r.user.sub);if(D(acc.AVAILABLE.balance)<amount)throw new BadRequestException('Insufficient available balance');const w=await tx.withdrawal.create({data:{userId:r.user.sub,amount:dec(amount),address:b.address,network:b.network,idempotencyKey:key,status:'VALIDATING'}});await tx.account.update({where:{id:acc.AVAILABLE.id},data:{balance:{decrement:dec(amount)},version:{increment:1}}});await tx.account.update({where:{id:acc.PENDING.id},data:{balance:{increment:dec(amount)},version:{increment:1}}});const tid=randomUUID();await tx.ledgerEntry.createMany({data:[{transactionId:tid,userId:r.user.sub,accountId:acc.AVAILABLE.id,type:'WITHDRAWAL_REQUEST',amount:dec(amount),direction:'DEBIT',referenceId:w.id},{transactionId:tid,userId:r.user.sub,accountId:acc.PENDING.id,type:'WITHDRAWAL_REQUEST',amount:dec(amount),direction:'CREDIT',referenceId:w.id}]});return w;});}
- @Post('support') async ticket(@Req()r:any,@Body()b:any){if(!b.subject||!b.message)throw new BadRequestException('Subject and message required');return this.db.supportTicket.create({data:{userId:r.user.sub,subject:b.subject,category:b.category||'Other',message:b.message}})}
- @Post('webhooks/demo') async webhook(@Headers('x-webhook-secret')secret:string,@Body()b:any){if(secret!==(process.env.WEBHOOK_SECRET||'demo-webhook-secret'))throw new ForbiddenException();if(!b.eventId||!b.depositId)throw new BadRequestException();const existing=await this.db.webhookEvent.findUnique({where:{eventId:b.eventId}});if(existing)return {ok:true,idempotent:true};await this.db.webhookEvent.create({data:{provider:b.provider||'demo',eventId:b.eventId,payload:b,status:'RECEIVED'}});return {ok:true,received:true};}
-}
 
-@Controller('admin') @UseGuards(AuthGuard)
-export class AdminController{
- constructor(private db:PrismaService){}
- private guard(r:any){if(r.user.role!=='ADMIN'&&r.user.role!=='SUPPORT')throw new ForbiddenException('Staff only');}
- @Get('tickets') async tickets(@Req()r:any){this.guard(r);return this.db.supportTicket.findMany({orderBy:{createdAt:'desc'},take:100,include:{user:{select:{email:true}}}})}
- @Post('tickets/:id/status') async status(@Req()r:any,@Param('id')id:string,@Body()b:any){this.guard(r);return this.db.supportTicket.update({where:{id},data:{status:b.status}})}
- @Get('users') async users(@Req()r:any){this.guard(r);return this.db.user.findMany({select:{id:true,email:true,role:true,createdAt:true},orderBy:{createdAt:'desc'},take:100})}
- @Get('reconciliation') async reconciliation(@Req()r:any){this.guard(r);const accounts=await this.db.account.groupBy({by:['type','currency'],_sum:{balance:true},orderBy:{type:'asc'}});return {generatedAt:new Date(),accounts,warning:'Production reconciliation should also compare provider/blockchain settlement records.'};}
-}
+const D = (x: any) => Number(x);
+const dec = (x: number) => x.toFixed(8);
 
-@Module({controllers:[FinanceController,AdminController],providers:[PrismaService]}) export class FinanceModule{}
+@Controller('finance')
+@UseGuards(AuthGuard)
+export class FinanceController {
+  constructor(private db: PrismaService) {}
+
+  private async accounts(tx: any, userId: string) {
+    const a = await tx.account.findMany({
+      where: { userId },
+    });
+
+    return Object.fromEntries(
+      a.map((x: any) => [x.type, x]),
+    );
+  }
+
+  private async ensureSystem(tx: any) {
+    let u = await tx.user.findUnique({
+      where: {
+        email: 'system@neuralvault.local',
+      },
+    });
+
+    if (!u) {
+      u = await tx.user.create({
+        data: {
+          email: 'system@neuralvault.local',
+          passwordHash: 'SYSTEM',
+          role: 'ADMIN',
+          accounts: {
+            create: {
+              type: 'SYSTEM',
+              currency: 'USD',
+            },
+          },
+        },
+      });
+    }
+
+    return u;
+  }
+
+  private async move(
+    tx: any,
+    userId: string,
+    from: any,
+    to: any,
+    amount: number,
+    type: any,
+    referenceId?: string,
+    description?: string,
+  ) {
+    if (amount <= 0) {
+      throw new BadRequestException('Amount must be positive');
+    }
+
+    const acc = await this.accounts(tx, userId);
+
+    if (!acc[from] || !acc[to]) {
+      throw new BadRequestException('Required account missing');
+    }
+
+    if (D(acc[from].balance) < amount) {
+      throw new BadRequestException(
+        'Insufficient available balance',
+      );
+    }
+
+    await tx.account.update({
+      where: { id: acc[from].id },
+      data: {
+        balance: {
+          decrement: dec(amount),
+        },
+        version: {
+          increment: 1,
+        },
+      },
+    });
+
+    await tx.account.update({
+      where: { id: acc[to].id },
+      data: {
+        balance: {
+          increment: dec(amount),
+        },
+        version: {
+          increment: 1,
+        },
+      },
+    });
+
+    const tid = randomUUID();
+
+    for (const [accountId, direction] of [
+      [acc[from].id, 'DEBIT'],
+      [acc[to].id, 'CREDIT'],
+    ]) {
+      await tx.ledgerEntry.create({
+        data: {
+          transactionId: tid,
+          userId,
+          accountId,
+          type,
+          amount: dec(amount),
+          direction,
+          referenceId,
+          description,
+        },
+      });
+    }
+
+    return tid;
+  }
+
+  @Get('me')
+  async me(@Req() r: any) {
+    const userId = r.user.sub;
+
+    const [
+      u,
+      accounts,
+      investments,
+      withdrawals,
+      deposits,
+      tickets,
+      ledger,
+    ] = await Promise.all([
+      this.db.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+        },
+      }),
+
+      this.db.account.findMany({
+        where: { userId },
+      }),
+
+      this.db.investment.findMany({
+        where: { userId },
+        orderBy: {
+          createdAt: 'desc',
+        },
+      }),
+
+      this.db.withdrawal.findMany({
+        where: { userId },
+        orderBy: {
+          createdAt: 'desc',
+        },
+        take: 20,
+      }),
+
+      this.db.deposit.findMany({
+        where: { userId },
+        orderBy: {
+          createdAt: 'desc',
+        },
+        take: 20,
+      }),
+
+      this.db.supportTicket.findMany({
+        where: { userId },
+        orderBy: {
+          createdAt: 'desc',
+        },
+      }),
+
+      this.db.ledgerEntry.findMany({
+        where: { userId },
+        orderBy: {
+          createdAt: 'desc',
+        },
+        take: 50,
+      }),
+    ]);
+
+    return {
+      user: u,
+      accounts,
+      investments,
+      withdrawals,
+      deposits,
+      tickets,
+      ledger,
+    };
+  }
+
+  @Get('plans')
+  plans() {
+    return Object.entries(PLANS).map(
+      ([name, v]: any) => ({
+        name,
+        ...v,
+      }),
+    );
+  }
+
+  @Get('affiliate')
+  async affiliate(@Req() r: any) {
+    let a =
+      await this.db.affiliateProfile.findUnique
