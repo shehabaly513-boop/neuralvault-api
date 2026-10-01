@@ -1,3 +1,22 @@
-import 'reflect-metadata'; import {NestFactory} from '@nestjs/core'; import {Module} from '@nestjs/common'; import {AuthModule} from './auth.module'; import {FinanceModule} from './finance.module';
-@Module({imports:[AuthModule,FinanceModule]}) class AppModule{}
-async function bootstrap(){const app=await NestFactory.create(AppModule);app.enableCors({origin:true});app.setGlobalPrefix('api');await app.listen(Number(process.env.PORT)||3001,'0.0.0.0')}bootstrap();
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  app.enableCors({
+    origin: [
+      'https://shehabaly513-boop.github.io',
+      'http://localhost:3000',
+      'http://localhost:5173',
+    ],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-webhook-secret'],
+  });
+
+  const port = process.env.PORT || 3000;
+
+  await app.listen(port, '0.0.0.0');
+}
+
+bootstrap();
